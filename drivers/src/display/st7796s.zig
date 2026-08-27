@@ -359,7 +359,7 @@ pub const TearingEffectMode = enum(u1) {
 /// `TEON` (0x35) -- enables the tearing-effect output pin and picks which
 /// blanking edges it pulses on. Only useful if that pin is wired up.
 pub const TearingEffectLine = packed struct(u8) {
-    mode: TearingEffectMode,
+    mode: TearingEffectMode = .v_blank_only,
     _reserved: u7 = 0,
 };
 
@@ -419,9 +419,9 @@ pub const InterfaceBits = enum(u3) {
 /// `mcu_format = .bpp16` (RGB565) -- see the note on `read` in the driver
 /// section below before using another format with them.
 pub const PixelFormat = packed struct(u8) {
-    mcu_format: InterfaceBits,
+    mcu_format: InterfaceBits = .bpp16,
     _reserved0: u1 = 0,
-    rgb_format: InterfaceBits,
+    rgb_format: InterfaceBits = .bpp16,
     _reserved1: u1 = 0,
 };
 
@@ -440,7 +440,7 @@ pub const TearScanline = extern struct {
 /// A plain 0-255 brightness value -- used as-is by `WRDISBV` (backlight
 /// brightness) and `WRCABCMB` (the floor CABC won't dim below).
 pub const Brightness = packed struct(u8) {
-    value: u8,
+    value: u8 = 0,
 };
 
 /// `WRCTRLD` (0x53) -- turns the backlight and adaptive-brightness paths on
@@ -684,8 +684,8 @@ pub const VcomOffset = packed struct(u8) {
 /// `read`'s single dummy byte (see below) doesn't match what the panel
 /// was actually configured for at reset.
 pub const SpiReadControl = packed struct(u8) {
-    dummy_clocks: u4,
-    enabled: bool,
+    dummy_clocks: u4 = 0,
+    enabled: bool = false,
     _reserved: u3 = 0,
 };
 
@@ -937,6 +937,28 @@ fn wireSize(comptime T: type) usize {
         else
             @sizeOf(T),
         else => @divExact(@bitSizeOf(T), 8),
+    };
+}
+
+/// An arbitrary-but-valid value of `T`, for tests that need *some*
+/// well-formed payload without caring which. Not simply
+/// `std.mem.zeroes(T)`: that constructs every field's all-zero-bits
+/// representation regardless of whether zero is actually one of that
+/// field's valid values, which is exactly wrong for a `packed struct`
+/// containing an enum whose encodings are all nonzero (`InterfaceBits`,
+/// used by `PixelFormat`, is one -- 0b011/0b101/0b110, never 0). A
+/// `packed struct(uN)` payload here instead gets its declared field
+/// defaults via `T{}` -- which is also why every such payload type in
+/// this file has a default for every field, not just the ones that
+/// happen to be zero-safe. Non-struct payloads (raw integers, `[N]u8`
+/// arrays) and `extern struct` payloads (address/range types built from
+/// plain `[N]u8`) have no such enum to trip over, so an all-zero value
+/// is always valid for them.
+fn defaultPayload(comptime T: type) T {
+    if (T == void) return {};
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| if (info.backing_integer != null) T{} else std.mem.zeroes(T),
+        else => std.mem.zeroes(T),
     };
 }
 
@@ -1231,7 +1253,7 @@ test "every Packet variant sends its documented opcode and payload width" {
 
         const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
 
-        const payload: Payload = if (Payload == void) {} else std.mem.zeroes(Payload);
+        const payload: Payload = defaultPayload(Payload);
         const packet = @unionInit(Packet, name, payload);
 
         try lcd.send(packet);
