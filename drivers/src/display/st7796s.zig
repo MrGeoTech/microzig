@@ -689,6 +689,163 @@ pub const SpiReadControl = packed struct(u8) {
     _reserved: u3 = 0,
 };
 
+// ---------------------------------------------------------------------
+// Read-only response payloads (`ReadOpcode`/`Response`, see `read` below)
+// ---------------------------------------------------------------------
+
+/// `RDDST` (0x09) response -- the fullest single snapshot of controller
+/// state this chip exposes, mostly mirroring the current `MADCTL`/`COLMOD`
+/// settings back at you plus a handful of on/off flags. The datasheet
+/// itself splits the 3-bit gamma-curve-select field non-contiguously
+/// (`gcs2` lands in the third response byte, `gcs1`/`gcs0` in the fourth);
+/// that split is kept here rather than papered over, so recombine with
+/// `gcs2 | (@as(u3, gcs1) << 1) | (@as(u3, gcs0) << 2)` if you need the
+/// full 0-3 curve index.
+pub const DisplayStatus = packed struct(u32) {
+    _reserved0: u2 = 0,
+    rgb: ColorOrder = .rgb,
+    ml: RefreshOrder = .forward,
+    mv: u1 = 0,
+    mx: u1 = 0,
+    my: u1 = 0,
+    booster_on: bool = false,
+
+    normal_mode: bool = false,
+    sleep_out: bool = false,
+    partial_mode: bool = false,
+    idle_mode: bool = false,
+    pixel_format: InterfaceBits = .bpp16,
+    _reserved1: u1 = 0,
+
+    gcs2: u1 = 0,
+    tearing_effect_on: bool = false,
+    display_on: bool = false,
+    _reserved2: u2 = 0,
+    inversion_on: bool = false,
+    _reserved3: u1 = 0,
+    vertical_scroll_on: bool = false,
+
+    _reserved4: u5 = 0,
+    tearing_effect_mode: TearingEffectMode = .v_blank_only,
+    gcs0: u1 = 0,
+    gcs1: u1 = 0,
+};
+
+/// `RDDPM` (0x0A) response -- narrower than `DisplayStatus`: just the
+/// power/sleep/display-mode flags, no addressing or pixel-format state.
+pub const PowerMode = packed struct(u8) {
+    _reserved: u2 = 0,
+    display_on: bool = false,
+    normal_mode: bool = false,
+    sleep_out: bool = false,
+    partial_mode: bool = false,
+    idle_mode: bool = false,
+    booster_on: bool = false,
+};
+
+/// `RDDIM` (0x0D) response -- vertical-scroll and inversion status, plus a
+/// `gamma_curve` status field. That field's own write-side command isn't
+/// documented anywhere in the ST7796S datasheet (older ST77xx parts expose
+/// it as `GAMSET`, 0x26; this one doesn't list that opcode at all), so
+/// treat `gamma_curve` as read-only status here -- there's nothing in
+/// `Packet` that sets it.
+pub const DisplayImageMode = packed struct(u8) {
+    gamma_curve: u3 = 0,
+    _reserved0: u2 = 0,
+    inversion_on: bool = false,
+    _reserved1: u1 = 0,
+    vertical_scroll_on: bool = false,
+};
+
+/// `RDDSM` (0x0E) response -- signal status for the tearing-effect output
+/// and (if wired up) the RGB interface's own sync/clock/enable lines.
+pub const DisplaySignalMode = packed struct(u8) {
+    dsi_error: bool = false,
+    _reserved: u1 = 0,
+    data_enable: bool = false,
+    pixel_clock: bool = false,
+    vsync: bool = false,
+    hsync: bool = false,
+    tearing_effect_mode: TearingEffectMode = .v_blank_only,
+    tearing_effect_on: bool = false,
+};
+
+/// `RDDSDR` (0x0F) response -- self-diagnostic result, valid after
+/// `SLPOUT`. `checksums_differ` refers to the values `RDFCHKSUM`/
+/// `RDCCHKSUM` (0xAA/0xAF) return.
+pub const SelfDiagnosticResult = packed struct(u8) {
+    checksums_differ: bool = false,
+    _reserved: u5 = 0,
+    functionality_ok: bool = false,
+    register_loading_ok: bool = false,
+};
+
+/// Every command this driver can read a response back from, a strict
+/// subset of `Opcode` -- restricting `read`'s first argument to this type
+/// rather than the full `Opcode` makes calling it with a write-only
+/// command (`.madctl`, say) a compile error instead of a runtime mistake.
+pub const ReadOpcode = enum(u8) {
+    rddid = @intFromEnum(Opcode.rddid),
+    rddst = @intFromEnum(Opcode.rddst),
+    rddpm = @intFromEnum(Opcode.rddpm),
+    rddmadctl = @intFromEnum(Opcode.rddmadctl),
+    rddcolmod = @intFromEnum(Opcode.rddcolmod),
+    rddim = @intFromEnum(Opcode.rddim),
+    rddsm = @intFromEnum(Opcode.rddsm),
+    rddsdr = @intFromEnum(Opcode.rddsdr),
+    ramrd = @intFromEnum(Opcode.ramrd),
+    rdtescan = @intFromEnum(Opcode.rdtescan),
+    rddisbv = @intFromEnum(Opcode.rddisbv),
+    rdctrld = @intFromEnum(Opcode.rdctrld),
+    rdcabc = @intFromEnum(Opcode.rdcabc),
+    rdcabcmb = @intFromEnum(Opcode.rdcabcmb),
+    rdfchksum = @intFromEnum(Opcode.rdfchksum),
+    rdcchksum = @intFromEnum(Opcode.rdcchksum),
+    rdid1 = @intFromEnum(Opcode.rdid1),
+    rdid2 = @intFromEnum(Opcode.rdid2),
+    rdid3 = @intFromEnum(Opcode.rdid3),
+    rdid4 = @intFromEnum(Opcode.rdid4),
+    spirc = @intFromEnum(Opcode.spirc),
+};
+
+/// The decoded response for whichever `ReadOpcode` was read -- returned
+/// by `read` already shaped as the type that opcode's datasheet row
+/// describes, not as bytes the caller has to reinterpret by hand. Reuses
+/// `Packet`'s own payload types wherever a status register happens to
+/// share its write-side counterpart's exact layout (`rddmadctl`/`madctl`,
+/// `rddcolmod`/`colmod`, `rdctrld`/`wrctrld`, `spirc`) -- one type
+/// documenting both directions, same idea as everywhere else in this
+/// file.
+pub const Response = union(ReadOpcode) {
+    /// Manufacturer ID, module/driver version ID, module/driver ID.
+    rddid: [3]u8,
+    rddst: DisplayStatus,
+    rddpm: PowerMode,
+    rddmadctl: MemoryAccessControl,
+    rddcolmod: PixelFormat,
+    rddim: DisplayImageMode,
+    rddsm: DisplaySignalMode,
+    rddsdr: SelfDiagnosticResult,
+    /// The pixels read into the `pixel_buf` passed to `read`.
+    ramrd: []Color,
+    /// The scanline the controller is currently updating.
+    rdtescan: u16,
+    rddisbv: Brightness,
+    rdctrld: DisplayControl,
+    /// `C[1:0]` only -- `RDCABC`'s response doesn't echo `WRCABC`'s color
+    /// enhancement bits, just the adaptive-brightness mode.
+    rdcabc: CabcMode,
+    rdcabcmb: Brightness,
+    rdfchksum: u8,
+    rdcchksum: u8,
+    rdid1: u8,
+    rdid2: u8,
+    rdid3: u8,
+    /// See the caveat on `Packet.rdid4` -- same ambiguity applies here.
+    rdid4: [3]u8,
+    spirc: SpiReadControl,
+};
+
 /// The panel's native pixel format: RGB565, matching `PixelFormat.bpp16`.
 /// `draw`, `fill`, and `read` all operate in this format.
 pub const Color = packed struct(u16) {
@@ -733,6 +890,11 @@ fn assertPayloadLayouts() void {
         .{ VcomOffset, 1 },
         .{ SpiReadControl, 1 },
         .{ Color, 2 },
+        .{ DisplayStatus, 4 },
+        .{ PowerMode, 1 },
+        .{ DisplayImageMode, 1 },
+        .{ DisplaySignalMode, 1 },
+        .{ SelfDiagnosticResult, 1 },
     };
 
     for (checks) |check| {
@@ -845,28 +1007,35 @@ pub fn fill(self: Self, color: Color, count: u32) Error!void {
     }
 }
 
-/// Issues a read-type command and fills `buf` with its response.
+/// Issues a read-type command and returns its response already decoded
+/// into the shape that command's datasheet row describes -- a `Response`
+/// with `opcode`'s matching tag active, not raw bytes the caller has to
+/// reinterpret by hand. That decoding is exactly why `read` takes a
+/// `ReadOpcode` rather than a full `Packet`: every arm below needs to know
+/// its own response width and layout at compile time, and restricting the
+/// argument to only the commands that actually have one of those means a
+/// write-only opcode can't be passed here at all.
 ///
 /// Every read command on this controller -- `RAMRD` included -- sends
 /// exactly one dummy byte before the real response starts; `read`
-/// discards that byte itself, so `buf` should be sized for the response
-/// alone (e.g. `buf.len == 2` for one `RAMRD` pixel in the panel's default
-/// RGB565 format, more for a multi-pixel read, 4 bytes for `RDDST`, and so
-/// on -- see each command's `Packet` payload comment above for its
-/// response width).
+/// discards that byte itself.
+///
+/// `pixel_buf` is read into (and returned as `Response.ramrd`) only for
+/// `opcode == .ramrd`; every other arm ignores it, so pass `&.{}` for a
+/// status read. Sized by the caller because how many pixels to read is a
+/// property of the call, not of the command the way every other
+/// response's width is.
 ///
 /// One thing this driver does *not* pin down, because it varies across
 /// the ST77xx family and needs checking against this exact panel's
 /// configuration: whether `RAMRD` reads back in the same 16-bit format
 /// `draw`/`fill` write in, or in the controller's wider native format
 /// regardless of `COLMOD`. Confirm against the datasheet's `RAMRD`
-/// section (and `RDDCOLMOD`, if in doubt at runtime) before assuming
-/// `read`'s bytes line up with `Color` for pixel data specifically --
-/// they do for every other read command here, which all return fixed,
-/// unambiguous byte widths.
-pub fn read(self: Self, packet: Packet, buf: []u8) Error!void {
-    const opcode: Opcode = packet;
-
+/// section (and a `.rddcolmod` read, if in doubt at runtime) before
+/// assuming `Response.ramrd`'s bytes line up with `Color` -- every other
+/// response here has a fixed, unambiguous width and doesn't share that
+/// caveat.
+pub fn read(self: Self, opcode: ReadOpcode, pixel_buf: []Color) Error!Response {
     try self.data_cmd.write(.low);
     try self.bus.connect();
     defer self.bus.disconnect();
@@ -875,7 +1044,113 @@ pub fn read(self: Self, packet: Packet, buf: []u8) Error!void {
     try self.data_cmd.write(.high);
     var dummy: [1]u8 = undefined;
     _ = try self.bus.read(&dummy);
-    _ = try self.bus.read(buf);
+
+    switch (opcode) {
+        .rddid => {
+            var bytes: [3]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddid = bytes };
+        },
+        .rddst => {
+            var bytes: [4]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddst = @bitCast(bytes) };
+        },
+        .rddpm => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddpm = @bitCast(bytes) };
+        },
+        .rddmadctl => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddmadctl = @bitCast(bytes) };
+        },
+        .rddcolmod => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddcolmod = @bitCast(bytes) };
+        },
+        .rddim => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddim = @bitCast(bytes) };
+        },
+        .rddsm => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddsm = @bitCast(bytes) };
+        },
+        .rddsdr => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddsdr = @bitCast(bytes) };
+        },
+        .ramrd => {
+            _ = try self.bus.read(std.mem.sliceAsBytes(pixel_buf));
+            return .{ .ramrd = pixel_buf };
+        },
+        .rdtescan => {
+            var bytes: [2]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdtescan = std.mem.readInt(u16, &bytes, .big) };
+        },
+        .rddisbv => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rddisbv = @bitCast(bytes) };
+        },
+        .rdctrld => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdctrld = @bitCast(bytes) };
+        },
+        .rdcabc => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdcabc = @enumFromInt(@as(u2, @truncate(bytes[0]))) };
+        },
+        .rdcabcmb => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdcabcmb = @bitCast(bytes) };
+        },
+        .rdfchksum => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdfchksum = bytes[0] };
+        },
+        .rdcchksum => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdcchksum = bytes[0] };
+        },
+        .rdid1 => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdid1 = bytes[0] };
+        },
+        .rdid2 => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdid2 = bytes[0] };
+        },
+        .rdid3 => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdid3 = bytes[0] };
+        },
+        .rdid4 => {
+            var bytes: [3]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .rdid4 = bytes };
+        },
+        .spirc => {
+            var bytes: [1]u8 = undefined;
+            _ = try self.bus.read(&bytes);
+            return .{ .spirc = @bitCast(bytes) };
+        },
+    }
 }
 
 // =======================================================================
@@ -1054,7 +1329,7 @@ test "fill with count 1 sends exactly one pixel" {
     try td.expect_sent(&.{ &.{0x2C}, std.mem.asBytes(&blue) });
 }
 
-test "read discards the mandatory dummy byte before filling the buffer" {
+test "read discards the mandatory dummy byte and returns the decoded pixels" {
     var dc = Digital_IO.TestDevice.init(.output, .low);
     var rst = Digital_IO.TestDevice.init(.output, .low);
     var td = DatagramDevice.TestDevice.init(&.{
@@ -1064,11 +1339,73 @@ test "read discards the mandatory dummy byte before filling the buffer" {
     defer td.deinit();
 
     const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
-    var buf: [2]u8 = undefined;
-    try lcd.read(.{ .ramrd = {} }, &buf);
+    var pixel_buf: [1]Color = undefined;
+    const response = try lcd.read(.ramrd, &pixel_buf);
 
-    try testing.expectEqualSlices(u8, &.{ 0x12, 0x34 }, &buf);
+    try testing.expectEqualSlices(u8, &.{ 0x12, 0x34 }, std.mem.sliceAsBytes(response.ramrd));
     try td.expect_sent(&.{&.{0x2E}});
+}
+
+test "rddpm decodes the power-mode flags in datasheet order" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    // D7..D0 = BSTON IDMON PTLON SLPOUT NORON DISON 0 0 = 0000_1000, the
+    // datasheet's own post-reset default: normal (non-partial) display
+    // mode, everything else off.
+    var td = DatagramDevice.TestDevice.init(&.{ &.{0x00}, &.{0x08} }, true);
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    const response = try lcd.read(.rddpm, &.{});
+
+    try testing.expectEqual(PowerMode{ .normal_mode = true }, response.rddpm);
+}
+
+test "rddst decodes MADCTL/COLMOD state back into the same reused types" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    // byte0: BSTON=0 MY=0 MX=1 MV=1 ML=0 RGB=1(bgr) ST25=0 ST24=0 -> 0b0011_0100
+    // byte1: ST23=0 IFPF=101(16bpp) IDMON=0 PTLON=0 SLOUT=1 NORON=1 -> 0b0101_0011
+    // byte2, byte3: every status flag off
+    var td = DatagramDevice.TestDevice.init(&.{
+        &.{0x00},
+        &.{ 0b0011_0100, 0b0101_0011, 0x00, 0x00 },
+    }, true);
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    const response = try lcd.read(.rddst, &.{});
+
+    try testing.expectEqual(ColorOrder.bgr, response.rddst.rgb);
+    try testing.expectEqual(@as(u1, 1), response.rddst.mx);
+    try testing.expectEqual(@as(u1, 1), response.rddst.mv);
+    try testing.expectEqual(InterfaceBits.bpp16, response.rddst.pixel_format);
+    try testing.expectEqual(true, response.rddst.sleep_out);
+    try testing.expectEqual(true, response.rddst.normal_mode);
+}
+
+test "rdtescan decodes a big-endian scanline number" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    var td = DatagramDevice.TestDevice.init(&.{ &.{0x00}, &.{ 0x01, 0x2C } }, true);
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    const response = try lcd.read(.rdtescan, &.{});
+
+    try testing.expectEqual(@as(u16, 0x012C), response.rdtescan);
+}
+
+test "rdcabc decodes only the two mode bits, ignoring the rest of the byte" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    var td = DatagramDevice.TestDevice.init(&.{ &.{0x00}, &.{0b1111_1110} }, true);
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    const response = try lcd.read(.rdcabc, &.{});
+
+    try testing.expectEqual(CabcMode.still_picture, response.rdcabc);
 }
 
 /// A `Digital_IO` fake that records every state it's ever written, in
@@ -1294,8 +1631,8 @@ test "read propagates a failure on the dummy byte and still disconnects" {
     var rst = Digital_IO.TestDevice.init(.output, .low);
     const lcd = init(bus.datagram_device(), rst.digital_io(), dc.digital_io());
 
-    var buf: [2]u8 = undefined;
-    try testing.expectError(error.IoError, lcd.read(.{ .ramrd = {} }, &buf));
+    var pixel_buf: [1]Color = undefined;
+    try testing.expectError(error.IoError, lcd.read(.ramrd, &pixel_buf));
     try testing.expectEqual(@as(u32, 1), bus.disconnect_count);
 }
 
@@ -1309,8 +1646,8 @@ test "read propagates a failure on the real data, not just the dummy byte" {
     var rst = Digital_IO.TestDevice.init(.output, .low);
     const lcd = init(bus.datagram_device(), rst.digital_io(), dc.digital_io());
 
-    var buf: [2]u8 = undefined;
-    try testing.expectError(error.IoError, lcd.read(.{ .ramrd = {} }, &buf));
+    var pixel_buf: [1]Color = undefined;
+    try testing.expectError(error.IoError, lcd.read(.ramrd, &pixel_buf));
 }
 
 test "a short read reports BufferOverrun rather than partial success" {
@@ -1322,8 +1659,8 @@ test "a short read reports BufferOverrun rather than partial success" {
     var rst = Digital_IO.TestDevice.init(.output, .low);
     const lcd = init(bus.datagram_device(), rst.digital_io(), dc.digital_io());
 
-    var buf: [2]u8 = undefined;
-    try testing.expectError(error.BufferOverrun, lcd.read(.{ .ramrd = {} }, &buf));
+    var pixel_buf: [1]Color = undefined;
+    try testing.expectError(error.BufferOverrun, lcd.read(.ramrd, &pixel_buf));
 }
 
 test "a data_cmd pin that can't be written surfaces as an error, not a panic" {
