@@ -900,11 +900,30 @@ fn assertPayloadLayouts() void {
     for (checks) |check| {
         const T = check[0];
         const expected_size = check[1];
-        if (@sizeOf(T) != expected_size) @compileError(std.fmt.comptimePrint(
+        // `@bitSizeOf(T) / 8`, not `@sizeOf(T)`: for a type whose backing
+        // width isn't a "nice" power-of-two byte count (`packed
+        // struct(u24)`, say), `@sizeOf` includes ABI alignment padding
+        // that isn't part of the wire format -- `send`'s payload write
+        // below uses the same `wireSize` helper, so this assertion checks
+        // exactly what actually goes out over SPI.
+        const actual_size = wireSize(T);
+        if (actual_size != expected_size) @compileError(std.fmt.comptimePrint(
             "{s} must be {d} byte(s) to match its datasheet row, but is {d}",
-            .{ @typeName(T), expected_size, @sizeOf(T) },
+            .{ @typeName(T), expected_size, actual_size },
         ));
     }
+}
+
+/// The number of bytes `T` actually occupies on the wire: `@bitSizeOf(T)
+/// / 8`, which for most payload types here equals `@sizeOf(T)` but for a
+/// type like `packed struct(u24)` does not -- `@sizeOf` rounds up to
+/// that type's ABI alignment (4 bytes for `u24` on this target), which is
+/// memory layout, not wire format. `@divExact` also doubles as an extra
+/// check: every payload here is meant to be a whole number of bytes, and
+/// this makes a fractional one a compile error instead of silent
+/// truncation.
+fn wireSize(comptime T: type) usize {
+    return @divExact(@bitSizeOf(T), 8);
 }
 
 /// Everything `init`/`rset`/`send`/`rect`/`draw`/`fill`/`read` can fail
@@ -959,9 +978,13 @@ pub fn send(self: Self, packet: Packet) Error!void {
 
     switch (packet) {
         inline else => |payload| {
-            if (@TypeOf(payload) != void) {
+            const Payload = @TypeOf(payload);
+            if (Payload != void) {
                 try self.data_cmd.write(.high);
-                try self.bus.write(std.mem.asBytes(&payload));
+                // `[0..wireSize(Payload)]`, not the whole of
+                // `std.mem.asBytes` -- see `wireSize`'s doc comment for
+                // why those can differ.
+                try self.bus.write(std.mem.asBytes(&payload)[0..wireSize(Payload)]);
             }
         },
     }
@@ -1172,7 +1195,14 @@ const testing = std.testing;
 fn noopDelay(_: u32) void {}
 
 test "every Packet variant sends its documented opcode and payload width" {
-    inline for (@typeInfo(Packet).@"union".fields) |field| {
+    // `std.meta.fieldNames`, not `@typeInfo(Packet).@"union".fields`:
+    // `Type.Union` doesn't carry a `.fields` slice on this Zig snapshot
+    // (the same adaptation `controller`'s own `build.zig` already had to
+    // make for the enum case) -- `@FieldType` then recovers each named
+    // field's payload type.
+    inline for (std.meta.fieldNames(Packet)) |name| {
+        const Payload = @FieldType(Packet, name);
+
         var dc = Digital_IO.TestDevice.init(.output, .low);
         var rst = Digital_IO.TestDevice.init(.output, .low);
         var td = DatagramDevice.TestDevice.init_receiver_only();
@@ -1180,8 +1210,8 @@ test "every Packet variant sends its documented opcode and payload width" {
 
         const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
 
-        const payload: field.type = if (field.type == void) {} else std.mem.zeroes(field.type);
-        const packet = @unionInit(Packet, field.name, payload);
+        const payload: Payload = if (Payload == void) {} else std.mem.zeroes(Payload);
+        const packet = @unionInit(Packet, name, payload);
 
         try lcd.send(packet);
 
@@ -1190,7 +1220,8 @@ test "every Packet variant sends its documented opcode and payload width" {
 
         var total_len: usize = 0;
         for (td.packets.items) |sent| total_len += sent.len;
-        try testing.expectEqual(1 + @sizeOf(field.type), total_len);
+        const expected_payload_len: usize = if (Payload == void) 0 else wireSize(Payload);
+        try testing.expectEqual(1 + expected_payload_len, total_len);
     }
 }
 
@@ -1451,7 +1482,11 @@ const LoggingPin = struct {
         .set_direction_fn = set_direction,
         .set_bias_fn = set_bias,
         .write_fn = write,
-        .read_fn = read,
+        // Qualified: `read` alone is ambiguous with this file's own
+        // top-level `read` (the driver method) -- both are reachable
+        // declarations from here, and Zig won't silently pick the inner
+        // one.
+        .read_fn = LoggingPin.read,
     };
 };
 
