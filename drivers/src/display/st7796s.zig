@@ -914,16 +914,30 @@ fn assertPayloadLayouts() void {
     }
 }
 
-/// The number of bytes `T` actually occupies on the wire: `@bitSizeOf(T)
-/// / 8`, which for most payload types here equals `@sizeOf(T)` but for a
-/// type like `packed struct(u24)` does not -- `@sizeOf` rounds up to
-/// that type's ABI alignment (4 bytes for `u24` on this target), which is
-/// memory layout, not wire format. `@divExact` also doubles as an extra
-/// check: every payload here is meant to be a whole number of bytes, and
-/// this makes a fractional one a compile error instead of silent
-/// truncation.
+/// The number of bytes `T` actually occupies on the wire.
+///
+/// Not simply `@sizeOf(T)`: for a `packed struct(u24)`, `@sizeOf` rounds
+/// up to 4 (that type's ABI alignment), which is memory layout, not wire
+/// format -- `@bitSizeOf(T) / 8` gives the real 3. `@divExact` doubles as
+/// an extra check there, making a fractional byte count a compile error.
+///
+/// Not simply `@bitSizeOf(T) / 8` either, though: that builtin is only
+/// defined for types with no implicit padding (integers, packed structs,
+/// arrays of those) and errors outright on an `extern struct` -- which is
+/// exactly what this file's multi-byte address/range payloads
+/// (`ColumnAddressSet` and friends) are, precisely *because* their plain
+/// `[N]u8` fields need no bit-packing help. For those, and for the raw
+/// `[N]u8` array payloads (`pgc`, `dgc1`, ...), `@sizeOf` is both safe to
+/// call and already exact -- neither shape has padding to round away.
 fn wireSize(comptime T: type) usize {
-    return @divExact(@bitSizeOf(T), 8);
+    return switch (@typeInfo(T)) {
+        .array => @sizeOf(T),
+        .@"struct" => |info| if (info.backing_integer != null)
+            @divExact(@bitSizeOf(T), 8)
+        else
+            @sizeOf(T),
+        else => @divExact(@bitSizeOf(T), 8),
+    };
 }
 
 /// Everything `init`/`rset`/`send`/`rect`/`draw`/`fill`/`read` can fail
@@ -1195,12 +1209,19 @@ const testing = std.testing;
 fn noopDelay(_: u32) void {}
 
 test "every Packet variant sends its documented opcode and payload width" {
-    // `std.meta.fieldNames`, not `@typeInfo(Packet).@"union".fields`:
-    // `Type.Union` doesn't carry a `.fields` slice on this Zig snapshot
-    // (the same adaptation `controller`'s own `build.zig` already had to
-    // make for the enum case) -- `@FieldType` then recovers each named
-    // field's payload type.
-    inline for (std.meta.fieldNames(Packet)) |name| {
+    // Iterates `Opcode`'s tags, not `Packet`'s union fields directly:
+    // `Packet` is `union(Opcode)`, so the two sets are identical by
+    // construction, and unlike `Type.Union` (no `.fields` on this Zig
+    // snapshot) or `std.meta.fieldNames` (doesn't resolve as
+    // comptime-known for a union here either), enumerating an enum's
+    // tags this way is already proven working on this exact toolchain --
+    // `controller`'s own `build.zig` does the same
+    // `inline for (comptime std.enums.values(...))` over `Program`.
+    // `@tagName`/`@FieldType`/`@unionInit` are compiler builtins that
+    // work directly off the type, not off `std.builtin.Type` reflection
+    // data, so they don't share either problem.
+    inline for (comptime std.enums.values(Opcode)) |opcode| {
+        const name = @tagName(opcode);
         const Payload = @FieldType(Packet, name);
 
         var dc = Digital_IO.TestDevice.init(.output, .low);
@@ -1215,7 +1236,6 @@ test "every Packet variant sends its documented opcode and payload width" {
 
         try lcd.send(packet);
 
-        const opcode: Opcode = packet;
         try testing.expectEqual(@intFromEnum(opcode), td.packets.items[0][0]);
 
         var total_len: usize = 0;
