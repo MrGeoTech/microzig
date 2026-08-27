@@ -7,6 +7,7 @@ pub const display = struct {
     pub const sh1106 = @import("display/sh1106.zig");
     pub const ssd1306 = @import("display/ssd1306.zig");
     pub const st77xx = @import("display/st77xx.zig");
+    pub const st7796s = @import("display/st7796s.zig");
     pub const hd44780 = @import("display/hd44780.zig");
     pub const sharp_memory_lcd = @import("display/sharp_memory_lcd.zig");
 
@@ -15,6 +16,7 @@ pub const display = struct {
     pub const SSD1306_I2C = ssd1306.SSD1306_I2C;
     pub const ST7735 = st77xx.ST7735;
     pub const ST7789 = st77xx.ST7789;
+    pub const ST7796S = st7796s;
     pub const HD44780 = hd44780.HD44780;
     pub const SharpMemory_LCD = sharp_memory_lcd.SharpMemory_LCD;
 
@@ -220,6 +222,7 @@ test {
     _ = display.sh1106;
     _ = display.ssd1306;
     _ = display.st77xx;
+    _ = display.st7796s;
     _ = display.HD44780;
     _ = display.sharp_memory_lcd;
 
