@@ -98,6 +98,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mlx90640-hottest-point", .file = "src/mlx90640_hottest_point.zig" },
         //.{ .name = "ssd1306", .file = "src/ssd1306_oled.zig" },
         .{ .name = "st7789", .file = "src/st7789_lcd.zig" },
+        .{ .name = "st7796s", .file = "src/st7796s_lcd.zig" },
         .{ .name = "net-pong", .file = "src/net/pong.zig" },
         .{ .name = "net-irq", .file = "src/net/irq.zig" },
         .{ .name = "net-scan", .file = "src/net/scan.zig" },

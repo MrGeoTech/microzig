@@ -819,7 +819,7 @@ pub fn SSD1306_Generic(comptime options: SSD1306_Options) type {
     };
 }
 
-pub const Color = mdf.display.colors.BlackWhite;
+pub const Color = mdf.display.color.BlackWhite;
 
 /// A framebuffer suitable for operation with the SSD1306.
 ///
