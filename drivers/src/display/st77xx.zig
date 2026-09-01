@@ -55,7 +55,7 @@ pub const DriverConfig = struct {
     Digital_IO: type = mdf.base.Digital_IO,
 
     /// Which color format should be used when writing pixel data.
-    Color: type = mdf.display.colors.RGB565_Generic(.big),
+    Color: type = mdf.display.color.Color(5, 6, 5, .big),
 };
 
 pub const DisplayConfig = struct {

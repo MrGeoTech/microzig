@@ -82,11 +82,11 @@ comptime {
 
 const spi = rp2xxx.spi.instance.SPI0;
 
-const black: st7796s.Color = .{};
-const white: st7796s.Color = .{ .r = 31, .g = 63, .b = 31 };
-const red: st7796s.Color = .{ .r = 31, .g = 0, .b = 0 };
-const green: st7796s.Color = .{ .r = 0, .g = 63, .b = 0 };
-const blue: st7796s.Color = .{ .r = 0, .g = 0, .b = 31 };
+const black = st7796s.Color.black;
+const white = st7796s.Color.white;
+const red = st7796s.Color.red;
+const green = st7796s.Color.green;
+const blue = st7796s.Color.blue;
 
 /// Fills the whole panel with one color -- `rect` sets the address
 /// window to everything, `fill` streams one `RAMWR` burst of repeated
@@ -116,8 +116,8 @@ fn fill_quadrant(lcd: st7796s, left: bool, top: bool, color: st7796s.Color) !voi
 fn draw_gradient(lcd: st7796s) !void {
     var row: [PANEL_WIDTH]st7796s.Color = undefined;
     for (&row, 0..) |*pixel, x| {
-        const level: u5 = @intCast((x * 31) / (PANEL_WIDTH - 1));
-        pixel.* = .{ .r = level, .g = 0, .b = 31 - level };
+        const level: u8 = @intCast((x * 255) / (PANEL_WIDTH - 1));
+        pixel.* = .rgb(level, 0, 255 - level);
     }
 
     for (0..PANEL_HEIGHT) |y| {

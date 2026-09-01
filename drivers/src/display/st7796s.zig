@@ -75,7 +75,7 @@
 //!     try lcd.send(.{ .dispon = {} });
 //!
 //!     try lcd.rect(0, 239, 0, 319);
-//!     try lcd.fill(.{ .r = 31, .g = 0, .b = 0 }, 240 * 320); // red screen
+//!     try lcd.fill(.red, 240 * 320); // red screen
 //!
 
 const std = @import("std");
@@ -83,6 +83,7 @@ const mdf = @import("../root.zig");
 
 const DatagramDevice = mdf.base.DatagramDevice;
 const Digital_IO = mdf.base.Digital_IO;
+const packets = mdf.display.packets;
 
 /// Every command this driver knows how to send, keyed by its datasheet hex
 /// opcode. This *is* `Packet`'s tag type -- see `Packet` below.
@@ -290,47 +291,17 @@ pub const Packet = union(Opcode) {
 // ---------------------------------------------------------------------
 
 /// `CASET` (0x2A) -- the column (X) range that `RAMWR`/`RAMRD` will
-/// address, inclusive on both ends. Big-endian on the wire, hence the
-/// constructor rather than plain integer fields (see the file header's
-/// "Byte order" note).
-pub const ColumnAddressSet = extern struct {
-    xs: [2]u8,
-    xe: [2]u8,
+/// address, inclusive on both ends. Big-endian on the wire, hence
+/// `packets.BigEndianRange` rather than plain integer fields (see the
+/// file header's "Byte order" note).
+pub const ColumnAddressSet = packets.BigEndianRange(u16);
 
-    pub fn init(xs: u16, xe: u16) ColumnAddressSet {
-        var self: ColumnAddressSet = undefined;
-        std.mem.writeInt(u16, &self.xs, xs, .big);
-        std.mem.writeInt(u16, &self.xe, xe, .big);
-        return self;
-    }
-};
-
-/// `RASET` (0x2B) -- the row (Y) range, mirrors `ColumnAddressSet`.
-pub const RowAddressSet = extern struct {
-    ys: [2]u8,
-    ye: [2]u8,
-
-    pub fn init(ys: u16, ye: u16) RowAddressSet {
-        var self: RowAddressSet = undefined;
-        std.mem.writeInt(u16, &self.ys, ys, .big);
-        std.mem.writeInt(u16, &self.ye, ye, .big);
-        return self;
-    }
-};
+/// `RASET` (0x2B) -- the row (Y) range, same shape as `ColumnAddressSet`.
+pub const RowAddressSet = packets.BigEndianRange(u16);
 
 /// `PTLAR` (0x30) -- the row range partial mode displays, once `PTLON` is
 /// active; everything outside it stays whatever it last held.
-pub const PartialArea = extern struct {
-    start: [2]u8,
-    end: [2]u8,
-
-    pub fn init(start: u16, end: u16) PartialArea {
-        var self: PartialArea = undefined;
-        std.mem.writeInt(u16, &self.start, start, .big);
-        std.mem.writeInt(u16, &self.end, end, .big);
-        return self;
-    }
-};
+pub const PartialArea = packets.BigEndianRange(u16);
 
 /// `VSCRDEF` (0x33) -- splits the panel into a fixed top area, a scrolling
 /// middle area, and a fixed bottom area, in rows. `VSCRSADD` then picks
@@ -396,15 +367,7 @@ pub const MemoryAccessControl = packed struct(u8) {
 };
 
 /// `VSCRSADD` (0x37) -- see `VerticalScrollDefinition`.
-pub const VerticalScrollStartAddress = extern struct {
-    address: [2]u8,
-
-    pub fn init(address: u16) VerticalScrollStartAddress {
-        var self: VerticalScrollStartAddress = undefined;
-        std.mem.writeInt(u16, &self.address, address, .big);
-        return self;
-    }
-};
+pub const VerticalScrollStartAddress = packets.BigEndianValue(u16);
 
 pub const InterfaceBits = enum(u3) {
     bpp12 = 0b011,
@@ -427,15 +390,7 @@ pub const PixelFormat = packed struct(u8) {
 
 /// `TESCAN` (0x44) -- the scanline that a tearing-effect pulse should fire
 /// on, when `TEON`'s mode calls for both edges. In panel rows, 0-indexed.
-pub const TearScanline = extern struct {
-    line: [2]u8,
-
-    pub fn init(line: u16) TearScanline {
-        var self: TearScanline = undefined;
-        std.mem.writeInt(u16, &self.line, line, .big);
-        return self;
-    }
-};
+pub const TearScanline = packets.BigEndianValue(u16);
 
 /// A plain 0-255 brightness value -- used as-is by `WRDISBV` (backlight
 /// brightness) and `WRCABCMB` (the floor CABC won't dim below).
@@ -847,12 +802,10 @@ pub const Response = union(ReadOpcode) {
 };
 
 /// The panel's native pixel format: RGB565, matching `PixelFormat.bpp16`.
-/// `draw`, `fill`, and `read` all operate in this format.
-pub const Color = packed struct(u16) {
-    b: u5 = 0,
-    g: u6 = 0,
-    r: u5 = 0,
-};
+/// `draw`, `fill`, and `read` all operate in this format. Build one with
+/// `.rgb(r, g, b)` (8-bit components, scaled down) or `.pct(r, g, b)`
+/// (0.0-1.0 per channel), or use a named preset (`.red`, `.white`, ...).
+pub const Color = mdf.display.color.Color(5, 6, 5, .big);
 
 comptime {
     assertPayloadLayouts();
@@ -1050,19 +1003,44 @@ pub fn draw(self: Self, pixels: []const Color) Error!void {
     try self.bus.write(std.mem.sliceAsBytes(pixels));
 }
 
+/// How many pixels `fill` batches into one bus write. Arbitrary but small
+/// enough to keep on the stack unconditionally (128 bytes at RGB565's 2
+/// bytes/pixel) while still cutting a full-screen fill's call count by
+/// two orders of magnitude -- see `fill`'s own doc comment for why that
+/// matters.
+const fill_chunk_pixels = 64;
+
 /// Writes `count` copies of one color into the current window -- the
 /// common case (clearing or filling a rectangle) without needing a
 /// `count`-sized buffer of repeated pixels. Same held-`CS` reasoning as
 /// `draw`.
+///
+/// Batches into `fill_chunk_pixels`-sized bursts rather than one
+/// `bus.write()` per pixel. That's not a style choice: a full 320x480
+/// fill is 153,600 pixels, and measured on real hardware, one write per
+/// pixel is visibly slow -- not because of the SPI clock (`draw`, which
+/// writes its whole buffer in a single call, has no such problem at the
+/// same clock speed), but because of the fixed dispatch/setup cost
+/// `bus.write()` pays on *every* call regardless of payload size, times
+/// 153,600. Batching into a small, fixed-size stack buffer cuts that
+/// call count by roughly `fill_chunk_pixels`x without needing a buffer
+/// sized to the fill itself.
 pub fn fill(self: Self, color: Color, count: u32) Error!void {
     try self.send(.{ .ramwr = {} });
     try self.data_cmd.write(.high);
     try self.bus.connect();
     defer self.bus.disconnect();
 
+    var chunk: [fill_chunk_pixels]Color = undefined;
+    @memset(&chunk, color);
+    const chunk_bytes = std.mem.sliceAsBytes(&chunk);
+
     var remaining = count;
-    while (remaining > 0) : (remaining -= 1) {
-        try self.bus.write(std.mem.asBytes(&color));
+    while (remaining >= fill_chunk_pixels) : (remaining -= fill_chunk_pixels) {
+        try self.bus.write(chunk_bytes);
+    }
+    if (remaining > 0) {
+        try self.bus.write(chunk_bytes[0 .. @as(usize, remaining) * @sizeOf(Color)]);
     }
 }
 
@@ -1349,11 +1327,7 @@ test "draw sends RAMWR then streams a distinct pixel run in one transfer" {
     defer td.deinit();
 
     const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
-    const pixels = [_]Color{
-        .{ .r = 31, .g = 0, .b = 0 },
-        .{ .r = 0, .g = 63, .b = 0 },
-        .{ .r = 0, .g = 0, .b = 31 },
-    };
+    const pixels = [_]Color{ .red, .green, .blue };
     try lcd.draw(&pixels);
 
     try td.expect_sent(&.{ &.{0x2C}, std.mem.sliceAsBytes(&pixels) });
@@ -1371,22 +1345,17 @@ test "draw with an empty slice still issues RAMWR and no data phase" {
     try td.expect_sent(&.{ &.{0x2C}, &.{} });
 }
 
-test "fill sends RAMWR then streams count copies of one color" {
+test "fill under one chunk sends RAMWR then a single partial-chunk write" {
     var dc = Digital_IO.TestDevice.init(.output, .low);
     var rst = Digital_IO.TestDevice.init(.output, .low);
     var td = DatagramDevice.TestDevice.init_receiver_only();
     defer td.deinit();
 
     const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
-    const red: Color = .{ .r = 31, .g = 0, .b = 0 };
-    try lcd.fill(red, 3);
+    try lcd.fill(.red, 3);
 
-    try td.expect_sent(&.{
-        &.{0x2C},
-        std.mem.asBytes(&red),
-        std.mem.asBytes(&red),
-        std.mem.asBytes(&red),
-    });
+    const expected = [_]Color{ .red, .red, .red };
+    try td.expect_sent(&.{ &.{0x2C}, std.mem.sliceAsBytes(&expected) });
 }
 
 test "fill with count 1 sends exactly one pixel" {
@@ -1396,10 +1365,53 @@ test "fill with count 1 sends exactly one pixel" {
     defer td.deinit();
 
     const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
-    const blue: Color = .{ .r = 0, .g = 0, .b = 31 };
-    try lcd.fill(blue, 1);
+    try lcd.fill(.blue, 1);
 
-    try td.expect_sent(&.{ &.{0x2C}, std.mem.asBytes(&blue) });
+    try td.expect_sent(&.{ &.{0x2C}, std.mem.asBytes(&Color.blue) });
+}
+
+test "fill with count 0 issues RAMWR but writes no pixel data" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    var td = DatagramDevice.TestDevice.init_receiver_only();
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    try lcd.fill(.black, 0);
+
+    try td.expect_sent(&.{&.{0x2C}});
+}
+
+test "fill with exactly one chunk's worth sends one full chunk write and no partial" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    var td = DatagramDevice.TestDevice.init_receiver_only();
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    try lcd.fill(.green, fill_chunk_pixels);
+
+    const expected = [_]Color{.green} ** fill_chunk_pixels;
+    try td.expect_sent(&.{ &.{0x2C}, std.mem.sliceAsBytes(&expected) });
+}
+
+test "fill spanning multiple chunks plus a remainder sends one write per full chunk, then a partial" {
+    var dc = Digital_IO.TestDevice.init(.output, .low);
+    var rst = Digital_IO.TestDevice.init(.output, .low);
+    var td = DatagramDevice.TestDevice.init_receiver_only();
+    defer td.deinit();
+
+    const lcd = init(td.datagram_device(), rst.digital_io(), dc.digital_io());
+    try lcd.fill(.white, fill_chunk_pixels * 2 + 5);
+
+    const full_chunk = [_]Color{.white} ** fill_chunk_pixels;
+    const remainder = [_]Color{.white} ** 5;
+    try td.expect_sent(&.{
+        &.{0x2C},
+        std.mem.sliceAsBytes(&full_chunk),
+        std.mem.sliceAsBytes(&full_chunk),
+        std.mem.sliceAsBytes(&remainder),
+    });
 }
 
 test "read discards the mandatory dummy byte and returns the decoded pixels" {
@@ -1666,20 +1678,20 @@ test "connect failing means no write is attempted" {
     try testing.expectEqual(@as(u32, 0), bus.write_count);
 }
 
-test "fill stops and still disconnects if a write fails partway through the burst" {
+test "fill stops and still disconnects if a chunk write fails partway through the burst" {
     var bus = FaultyBus.init();
     defer bus.deinit();
-    // Call 1 is RAMWR's opcode; calls 2-3 are the first two pixels; call 4 fails.
-    bus.fail_write_at = 4;
+    // Call 1 is RAMWR's opcode; call 2 is the first full chunk (ok); call 3,
+    // the second chunk, fails -- out of three chunks' worth requested.
+    bus.fail_write_at = 3;
 
     var dc = Digital_IO.TestDevice.init(.output, .low);
     var rst = Digital_IO.TestDevice.init(.output, .low);
     const lcd = init(bus.datagram_device(), rst.digital_io(), dc.digital_io());
 
-    const red: Color = .{ .r = 31, .g = 0, .b = 0 };
-    try testing.expectError(error.IoError, lcd.fill(red, 5));
+    try testing.expectError(error.IoError, lcd.fill(.red, fill_chunk_pixels * 3));
 
-    try testing.expectEqual(@as(u32, 4), bus.write_count);
+    try testing.expectEqual(@as(u32, 3), bus.write_count);
     // One disconnect for `send(.ramwr)`'s own transaction, one for the
     // burst's early exit -- never left connected after the error.
     try testing.expectEqual(@as(u32, 2), bus.disconnect_count);
@@ -1694,7 +1706,7 @@ test "draw propagates a failure on its single burst write and still disconnects"
     var rst = Digital_IO.TestDevice.init(.output, .low);
     const lcd = init(bus.datagram_device(), rst.digital_io(), dc.digital_io());
 
-    const pixels = [_]Color{ .{ .r = 1, .g = 2, .b = 3 }, .{ .r = 4, .g = 5, .b = 6 } };
+    const pixels = [_]Color{ .rgb(1, 2, 3), .rgb(4, 5, 6) };
     try testing.expectError(error.IoError, lcd.draw(&pixels));
     try testing.expectEqual(@as(u32, 2), bus.disconnect_count);
 }

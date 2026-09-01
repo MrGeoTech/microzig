@@ -21,7 +21,11 @@ pub const display = struct {
     pub const SharpMemory_LCD = sharp_memory_lcd.SharpMemory_LCD;
 
     // Export color types:
-    pub const colors = @import("display/colors.zig");
+    pub const color = @import("display/color.zig");
+
+    // Shared packet-payload building blocks (addressing/range types
+    // common across the ST77xx family's command protocol).
+    pub const packets = @import("display/packets.zig");
 };
 
 pub const input = struct {
@@ -225,6 +229,8 @@ test {
     _ = display.st7796s;
     _ = display.HD44780;
     _ = display.sharp_memory_lcd;
+    _ = display.color;
+    _ = display.packets;
 
     _ = input.keyboard_matrix;
     _ = input.debounced_button;
