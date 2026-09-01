@@ -1,35 +1,49 @@
-//! ST7796S Driver Demo
+//! ST7796S Driver Demo -- 52Pi EP-0172 "Pico Breadboard Kit Plus"
 //!
-//! Brings up an ST7796S SPI panel (e.g. the 52Pi EP-0172, a 320x480 4"
-//! TFT) using `microzig.drivers.display.ST7796S` and drives it directly
-//! -- unlike the `st7789` example, no off-screen framebuffer is needed
-//! here: `fill`/`draw` stream straight to the panel, so a full-screen
-//! fill is one `rect` + one `fill` call, not a buffer the size of the
-//! display.
+//! Brings up the EP-0172's 3.5" 320x480 ST7796SU1 panel using
+//! `microzig.drivers.display.ST7796S` and drives it directly -- unlike
+//! the `st7789` example, no off-screen framebuffer is needed here:
+//! `fill`/`draw` stream straight to the panel, so a full-screen fill is
+//! one `rect` + one `fill` call, not a buffer the size of the display.
 //!
-//! Pinout (placeholders -- update to match your wiring). MISO is wired
-//! because this driver, unlike the `ST77xx` family driver the `st7789`
-//! example uses, can read the panel back -- if your board's breakout
-//! doesn't expose a separate MISO/SDO pin (common on cheap 4-wire-only
-//! ST7796S modules), leave it unconnected and skip the read-back check
-//! below; everything else here is write-only.
+//! Pinout, from the board's own wiki (wiki.52pi.com/index.php?title=EP-0172):
 //!
-//! - SCK:  GPIO 10
-//! - MOSI: GPIO 11
-//! - MISO: GPIO 8
-//! - CS:   GPIO 9
-//! - DC:   GPIO 14
-//! - RST:  GPIO 15
+//!     Pico    TFT
+//!     GP2  -> CLK
+//!     GP3  -> DIN (MOSI)
+//!     GP5  -> CS
+//!     GP6  -> DC
+//!     GP7  -> RST
+//!
+//! That's SPI0's pin group, and it's the same wiring an already-working
+//! hand-rolled driver for this exact board uses. There's no MISO/SDO in
+//! that table -- this board's display header is 4-wire, write-only, so
+//! `read` (this driver's one capability the `st7789` example's `ST77xx`
+//! driver doesn't have) isn't reachable from here. GP8/GP9 are already
+//! spoken for elsewhere on this board (the capacitive touch controller's
+//! I2C0 SDA/SCL) -- don't repurpose them as SPI RX.
 //!
 //! Bring-up here is deliberately minimal: hardware reset, `SWRESET`,
 //! `SLPOUT`, `COLMOD`, `MADCTL`, `DISPON` -- the sequence known to work
-//! broadly across ST7796S modules (it's what a hand-rolled driver for
-//! this same chip family already runs successfully). Extended tuning
+//! broadly across ST7796S modules (it's what the hand-rolled driver for
+//! this same board already runs successfully). Extended tuning
 //! (`PWR1`-`PWR3`, `VCMPCTL`, gamma) is deliberately left at the chip's
 //! own power-on defaults rather than guessed at here -- if colors look
-//! washed out or unstable on your specific panel, dial those in via
-//! `lcd.send(.{ .pwr1 = ... })` and friends; see the doc comments on
-//! `st7796s.PowerControl1` and its neighbors for what each field does.
+//! washed out or unstable, dial those in via `lcd.send(.{ .pwr1 = ... })`
+//! and friends; see the doc comments on `st7796s.PowerControl1` and its
+//! neighbors for what each field does.
+//!
+//! ## If nothing seems to happen after flashing
+//!
+//! This example logs over the Pico's *hardware* UART (GP0 TX / GP1 RX),
+//! not USB CDC -- the Pico's USB port on this firmware doesn't enumerate
+//! as a serial device at all, so no `/dev/ttyACM0` (or `COMx`) ever
+//! appears, on any board, whether or not the example is working. Seeing
+//! `std.log` output means wiring a USB-to-serial adapter to GP0/GP1/GND;
+//! without one, watch the onboard LED (GP25) instead -- it blinks once a
+//! second the whole time `main` is running, independent of the display
+//! or logging, so it tells you the firmware booted and is alive even
+//! with nothing else connected.
 
 const std = @import("std");
 const microzig = @import("microzig");
@@ -40,12 +54,13 @@ const time = rp2xxx.time;
 const gpio = rp2xxx.gpio;
 const drivers = rp2xxx.drivers;
 
-const DISPLAY_CS_PIN = 9;
-const DISPLAY_SCK_PIN = 10;
-const DISPLAY_MOSI_PIN = 11;
-const DISPLAY_MISO_PIN = 8;
-const DISPLAY_DC_PIN = 14;
-const DISPLAY_RST_PIN = 15;
+const DISPLAY_SCK_PIN = 2;
+const DISPLAY_MOSI_PIN = 3;
+const DISPLAY_CS_PIN = 5;
+const DISPLAY_DC_PIN = 6;
+const DISPLAY_RST_PIN = 7;
+
+const LED_PIN = 25;
 
 const PANEL_WIDTH = 320;
 const PANEL_HEIGHT = 480;
@@ -65,7 +80,7 @@ comptime {
     _ = microzig.export_startup();
 }
 
-const spi = rp2xxx.spi.instance.SPI1;
+const spi = rp2xxx.spi.instance.SPI0;
 
 const black: st7796s.Color = .{};
 const white: st7796s.Color = .{ .r = 31, .g = 63, .b = 31 };
@@ -112,6 +127,10 @@ fn draw_gradient(lcd: st7796s) !void {
 }
 
 pub fn main() !void {
+    const led_pin = gpio.num(LED_PIN);
+    led_pin.set_function(.sio);
+    led_pin.set_direction(.out);
+
     inline for (&.{ uart_tx_pin, uart_rx_pin }) |pin| {
         pin.set_function(.uart);
     }
@@ -123,17 +142,16 @@ pub fn main() !void {
     const cs_pin = gpio.num(DISPLAY_CS_PIN);
     const sck_pin = gpio.num(DISPLAY_SCK_PIN);
     const mosi_pin = gpio.num(DISPLAY_MOSI_PIN);
-    const miso_pin = gpio.num(DISPLAY_MISO_PIN);
     const dc_pin = gpio.num(DISPLAY_DC_PIN);
     const rst_pin = gpio.num(DISPLAY_RST_PIN);
 
-    inline for (&.{ cs_pin, sck_pin, mosi_pin, miso_pin }) |pin| {
+    inline for (&.{ cs_pin, sck_pin, mosi_pin }) |pin| {
         pin.set_function(.spi);
     }
 
     try spi.apply(.{
         .clock_config = rp2xxx.clock_config,
-        .baud_rate = 10_000_000, // 10 MHz is a safe starting point; check your panel's datasheet for its max.
+        .baud_rate = 10_000_000, // 10 MHz is a safe starting point; the ST7796SU1 datasheet allows more.
     });
 
     var spi_dev = drivers.SPI_Device.init(spi, .{
@@ -161,27 +179,40 @@ pub fn main() !void {
     try lcd.send(.{ .dispon = {} });
     time.sleep_ms(50);
 
-    // Sanity check that MISO is actually wired and the panel is
-    // answering, not just accepting writes blind: RDDID's response is
-    // the manufacturer/module-version/module-driver ID, which is fixed
-    // and non-zero on real hardware. Comment this out if your board has
-    // no MISO connection (see the pinout note above).
-    const id = try lcd.read(.rddid, &.{});
-    std.log.info("ST7796S RDDID: {any}", .{id.rddid});
+    std.log.info("ST7796S bring-up done, starting color demo", .{});
+
+    var last_blink = time.get_time_since_boot().to_us();
 
     while (true) {
         inline for (.{ red, green, blue, white, black }) |color| {
             try fill_screen(lcd, color);
-            time.sleep_ms(1000);
+            blink_while_waiting(led_pin, &last_blink, 1000);
         }
 
         try fill_quadrant(lcd, true, true, red);
         try fill_quadrant(lcd, false, true, green);
         try fill_quadrant(lcd, true, false, blue);
         try fill_quadrant(lcd, false, false, white);
-        time.sleep_ms(2000);
+        blink_while_waiting(led_pin, &last_blink, 2000);
 
         try draw_gradient(lcd);
-        time.sleep_ms(2000);
+        blink_while_waiting(led_pin, &last_blink, 2000);
+    }
+}
+
+/// Waits `duration_ms`, toggling `led_pin` once a second while it does --
+/// so the "is the firmware alive" heartbeat keeps blinking through every
+/// pause in the color demo, not just once at startup.
+fn blink_while_waiting(led_pin: gpio.Pin, last_blink: *u64, duration_ms: u32) void {
+    const start = time.get_time_since_boot().to_us();
+    const duration_us: u64 = @as(u64, duration_ms) * 1000;
+
+    while (time.get_time_since_boot().to_us() - start < duration_us) {
+        const now = time.get_time_since_boot().to_us();
+        if (now - last_blink.* >= 500_000) {
+            last_blink.* = now;
+            led_pin.toggle();
+        }
+        time.sleep_ms(10);
     }
 }
